@@ -25,6 +25,26 @@ size_t utf8_length(unsigned char c) {
     return c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : 4;
 }
 
+/**
+ * ModernBERT-ja's tokenizer, which Irodori-TTS v4.1-Small and v4.1-Small-MF use, takes many phrases whole as one
+ * piece, such as "本サービスの利用", "口コミ評価" and "ポイント還元", and the model cannot say them: it saw such pieces
+ * too rarely in training. About 1,000 pieces of the vocabulary are unsayable this way. To ease this, a piece of
+ * kSplitChars characters or more, "▁" not counted, that scores kRareScore or less scores kAvoidedScore instead, so the
+ * Viterbi path spells the phrase with finer pieces ("本サービス|の利用", "口コミ|評価", "ポイント|還元"), and the model
+ * says nearly all of them.
+ */
+constexpr size_t kSplitChars = 4;
+constexpr double kRareScore = -13.0;
+constexpr double kAvoidedScore = -1e9;
+
+size_t piece_chars(const std::string & piece) {
+    size_t n = 0;
+    for (size_t i = 0; i < piece.size(); i += utf8_length((unsigned char) piece[i])) {
+        if (piece.compare(i, 3, "\xE2\x96\x81") != 0) n++;
+    }
+    return n;
+}
+
 }  // namespace
 
 Tokenizer::Tokenizer(const ModelFile & m) {
@@ -50,7 +70,10 @@ Tokenizer::Tokenizer(const ModelFile & m) {
         scores_ = m.f64_array("irodori-tts.tokenizer.scores");
         if (scores_.size() != tokens_.size()) throw Error(Fault::File, m.path() + ": the tokenizer does not have a score for each token");
         double lowest = 0;
-        for (double score : scores_) lowest = std::min(lowest, score);
+        for (size_t i = 0; i < scores_.size(); i++) {
+            if (scores_[i] <= kRareScore && piece_chars(tokens_[i]) >= kSplitChars) scores_[i] = kAvoidedScore;
+            lowest = std::min(lowest, scores_[i]);
+        }
         unknown_score_ = lowest - kUnknownPenalty;
     }
     for (int32_t id : added) {
